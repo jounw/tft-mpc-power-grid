@@ -310,10 +310,18 @@ if len(day_data) < 24:
     st.warning("No data for selected date.")
     st.stop()
 
-demand_actual = day_data["demand"].values[:24].astype(float)
-# renewable_total: test_raw.csv의 실제 재생에너지 발전량(MWh) — 04_run_mpc.py와 동일 소스
-solar_actual  = np.clip(day_data["renewable_total"].values[:24].astype(float), 0, None) * renew_mult
+demand_actual  = day_data["demand"].values[:24].astype(float)
 selected_month = pd.to_datetime(selected_date).month
+
+# ── 합성 태양광 프로파일 ────────────────────────────────────────────────────
+# 호남권 태양광 설비 ~10 GW (2024), 시간별 실측 없어 가우시안 근사
+_SOLAR_PEAK_MW = {1:700, 2:900, 3:1200, 4:1600, 5:1900,
+                  6:2000, 7:1800, 8:1900, 9:1500, 10:1100, 11:800, 12:600}
+_peak = _SOLAR_PEAK_MW.get(selected_month, 1200)
+_hours = np.arange(24)
+solar_actual = np.clip(
+    _peak * np.exp(-0.5 * ((_hours - 12.0) / 3.0) ** 2), 0, None
+).astype(float) * renew_mult
 
 if TFT_AVAILABLE:
     fc_row    = forecasts[forecasts["date"] == selected_date]
@@ -326,7 +334,7 @@ wc1, wc2, wc3, wc4 = st.columns(4)
 wc1.metric("🌡 Avg Temp",      f"{day_data['temp_mean'].mean():.1f} °C")
 wc2.metric("💧 Humidity",      f"{day_data['humidity'].mean():.0f} %")
 wc3.metric("💨 Wind Speed",    f"{day_data['wind_speed'].mean():.1f} m/s")
-wc4.metric("☀️ Renewable Gen", f"{solar_actual.sum():.0f} MWh (daily)")
+wc4.metric("☀️ Solar Gen (est)", f"{solar_actual.sum():.0f} MWh (daily)")
 
 st.divider()
 
