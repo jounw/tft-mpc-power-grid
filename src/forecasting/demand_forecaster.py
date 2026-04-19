@@ -359,7 +359,8 @@ def load_model(path: str, input_size: int, hidden_size: int = 256,
                           num_lstm_layers=num_layers, horizon=horizon)
     else:
         model = DemandLSTM(input_size, hidden_size, num_layers, horizon)
-    model.load_state_dict(torch.load(path, map_location="cpu"))
+    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    model.load_state_dict(torch.load(path, map_location=device))
     return model
 
 
