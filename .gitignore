@@ -29,10 +29,10 @@ data/processed/y_test.npy
 # KPX raw source files (download from https://epsis.kpx.or.kr)
 data/raw/kpx/한국전력거래소_지역별\ 시간대별\ 전력거래량\(01~24\)/
 
-# Trained model weights (too large for git)
-models/*.pt
-models/*.pth
+# Trained model weights
 models/archive/
+models/demand_lstm_*.pt
+models/demand_vmd_*.pt
 
 # Logs and output figures
 logs/*.png
