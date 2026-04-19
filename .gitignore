@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Large processed arrays (regenerate via scripts/02_preprocess.py)
+data/processed/X_train.npy
+data/processed/X_val.npy
+data/processed/X_test.npy
+data/processed/y_train.npy
+data/processed/y_val.npy
+data/processed/y_test.npy
+
+# KPX raw source files (download from https://epsis.kpx.or.kr)
+data/raw/kpx/한국전력거래소_지역별\ 시간대별\ 전력거래량\(01~24\)/
+
+# Trained model weights (too large for git)
+models/*.pt
+models/*.pth
+models/archive/
+
+# Logs and output figures
+logs/*.png
+logs/*.jpg
+
+# Scratch figure directories
+figss/
+figsss/
+year_continuous*.png
+power_forecast/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets
+.env
+*.key

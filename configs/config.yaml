@@ -1,0 +1,33 @@
+data:
+  train_start: "2014-01-01"
+  train_end:   "2023-12-31"
+  test_start:  "2024-01-01"
+  test_end:    "2025-12-31"
+  exclude:     # 코로나 기간 제외
+    - ["2020-01-20", "2021-12-31"]
+
+  raw_dir:       "data/raw"
+  processed_dir: "data/processed"
+
+weather:
+  api_key: "${KMA_API_KEY}"   # 기상청 공공데이터포털 API 키 (환경변수: KMA_API_KEY)
+  # 호남권 대표 관측소 (광주 단일 사용 — 수집 속도 우선)
+  stations:
+    광주:  156   # 광주광역시 (호남권 대표)
+  variables:
+    - ta      # 기온 (°C)
+    - hm      # 습도 (%)
+    - ws      # 풍속 (m/s)
+    - wd      # 풍향 (°)
+    - si      # 일사량 (MJ/m²)
+    - rn      # 강수량 (mm)
+
+holiday:
+  api_key: "YOUR_DATA_GO_KR_API_KEY"  # 공공데이터포털 API 키
+
+kpx:
+  # KPX는 API 미제공 → 수동 다운로드 후 파싱
+  # https://epsis.kpx.or.kr → 전력통계 → 시간별 전력수요/발전량
+  demand_file:  "data/raw/kpx/demand.xlsx"
+  solar_file:   "data/raw/kpx/solar.xlsx"
+  wind_file:    "data/raw/kpx/wind.xlsx"
