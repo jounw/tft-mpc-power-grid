@@ -9,7 +9,18 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-from src.optimization.mpc import solve_mpc_plan
+import src.optimization.mpc as _mpc  # monkey-patch용 모듈 참조
+
+# ── 04_run_mpc.py 동일 SMP 프로파일 ──────────────────────────────────────────
+_BASE_SMP     = 176.0
+_SEASON_MULT  = {12:1.25,1:1.25,2:1.25,6:1.30,7:1.30,8:1.30,
+                 3:1.00,4:1.00,5:1.00,9:1.00,10:1.00,11:1.00}
+
+def make_price_profile(month: int, seed: int = 0):
+    rng  = np.random.default_rng(seed)
+    mult = _SEASON_MULT.get(month, 1.0)
+    imp  = _BASE_SMP * mult * rng.uniform(0.92, 1.08, 24).astype(np.float32)
+    return imp, imp * 0.95
 
 # ── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -46,102 +57,96 @@ except FileNotFoundError as e:
         TFT_AVAILABLE = False
 
 
-# ── Simulation helpers ──────────────────────────────────────────────────────
+# ── Simulation helpers (04_run_mpc.py 동일 로직) ───────────────────────────
 def run_rule_based(dm, solar, p):
+    """04_run_mpc.py sim_rule_based와 동일. 슬라이더 파라미터 반영."""
+    nuc = p["nuclear"]
+    coal = p["coal"]
+    ess_cap = p["ess_cap"]
+    ess_pwr = p["ess_pwr"]
+    ess_eff = p["ess_eff"]
+    soc_min = p["soc_min"]
+    soc_max = p["soc_max"]
+    imp_cap = p["imp_cap"]
+    exp_cap = p["exp_cap"]
+
     soc = p["soc_init"]
     rows = []
     for t in range(24):
-        fixed = p["nuclear"] + p["coal"] + solar[t]
+        fixed = nuc + coal + solar[t]
         bal   = fixed - dm[t]
         chg = dis = 0.0
         if bal > 0:
-            chg = max(0.0, min(p["ess_pwr"], bal,
-                               (p["soc_max"] - soc) * p["ess_cap"] / p["ess_eff"]))
-            soc += chg * p["ess_eff"] / p["ess_cap"]
-        else:
-            dis = max(0.0, min(p["ess_pwr"], -bal,
-                               (soc - p["soc_min"]) * p["ess_cap"] * p["ess_eff"]))
-            soc -= dis / (p["ess_eff"] * p["ess_cap"])
-        soc = float(np.clip(soc, p["soc_min"], p["soc_max"]))
+            chg = max(0.0, min(ess_pwr, bal, (soc_max - soc) * ess_cap / ess_eff))
+            soc += chg * ess_eff / ess_cap
+        elif bal < 0:
+            dis = max(0.0, min(ess_pwr, -bal, (soc - soc_min) * ess_cap * ess_eff))
+            soc -= dis / (ess_eff * ess_cap)
+        soc = float(np.clip(soc, soc_min, soc_max))
 
-        ess_net = chg - dis * p["ess_eff"]
+        ess_net = chg - dis * ess_eff
         lng = float(np.clip(dm[t] - (fixed - ess_net), p["lng_min"], p["lng_max"]))
         total   = fixed + lng - ess_net
         surplus = max(0.0, total - dm[t])
-        export  = min(p["exp_cap"], surplus)
+        export  = min(exp_cap, surplus)
         deficit = max(0.0, dm[t] - (total - export))
-        imp     = min(deficit, p["imp_cap"])
+        imp     = min(deficit, imp_cap)
         curtail = max(0.0, (total - export) - dm[t] - imp)
         cost    = lng * 120 + imp * 176 - export * 176 * 0.45
-        rows.append(dict(nuclear=p["nuclear"], coal=p["coal"], lng=lng,
+        rows.append(dict(nuclear=nuc, coal=coal, lng=lng,
                          solar=solar[t], ess_charge=chg, ess_discharge=dis,
                          grid_import=imp, export_mwh=export,
                          curtailment=curtail, soc=soc, cost=cost, demand=dm[t]))
     return pd.DataFrame(rows)
 
 
-def run_mpc(dm, solar, fc_demand, p):
-    imp_price = np.full(24, 176.0)
-    exp_price = np.full(24, 167.0)
-    soc = p["soc_init"]
-    lng_now = p["lng_min"]
-    rows = []
+def run_mpc(dm, solar, fc_demand, p, month: int = 1):
+    """04_run_mpc.py run_rolling_mpc와 완전히 동일한 로직.
+    슬라이더 파라미터를 mpc 모듈 상수에 monkey-patch 후 호출."""
+    imp_price, exp_price = make_price_profile(month)
 
-    ESS_EFF = p["ess_eff"]
-    ESS_CAP = p["ess_cap"]
-    SOC_MIN = p["soc_min"]
-    SOC_MAX = p["soc_max"]
+    profile = {
+        "demand": dm,
+        "solar":  solar,
+        "wind":   np.zeros(24, dtype=np.float32),
+        "solar_forecast": solar,
+        "wind_forecast":  np.zeros(24, dtype=np.float32),
+    }
 
-    for t in range(24):
-        rem = 24 - t
-        dm_fc  = np.array(fc_demand[t:], dtype=float)
-        so_fc  = np.zeros(rem)
-        wi_fc  = np.zeros(rem)
-        imp_fc = imp_price[t:]
-        exp_fc = exp_price[t:]
+    # 원본 상수 백업
+    _KEYS = ["NUCLEAR", "COAL", "LNG_CAP", "LNG_MIN", "LNG_RAMP",
+             "ESS_CAP", "ESS_PWR", "ESS_MAX_PWR",
+             "SOC_INIT", "SOC_MIN", "SOC_MAX", "EXP_CAP", "IMP_CAP"]
+    _orig = {k: getattr(_mpc, k) for k in _KEYS if hasattr(_mpc, k)}
 
-        # adjust net demand for fixed generation
-        dm_adj = dm_fc - p["nuclear"] - p["coal"] - solar[t:t + rem]
+    try:
+        _mpc.NUCLEAR     = float(p["nuclear"])
+        _mpc.COAL        = float(p["coal"])
+        _mpc.LNG_CAP     = float(p["lng_max"])
+        _mpc.LNG_MIN     = float(p["lng_min"])
+        _mpc.ESS_CAP     = float(p["ess_cap"])
+        _mpc.ESS_PWR     = float(p["ess_pwr"])
+        _mpc.ESS_MAX_PWR = float(p["ess_pwr"])
+        _mpc.SOC_INIT    = float(p["soc_init"])
+        _mpc.SOC_MIN     = float(p["soc_min"])
+        _mpc.SOC_MAX     = float(p["soc_max"])
+        _mpc.EXP_CAP     = float(p["exp_cap"])
+        _mpc.IMP_CAP     = float(p["imp_cap"])
 
-        res = solve_mpc_plan(
-            dm_fc - p["nuclear"] - p["coal"],
-            so_fc, wi_fc,
-            imp_fc, exp_fc,
-            soc, lng_now,
+        df = _mpc.run_rolling_mpc(
+            profile,
+            fc_demand.tolist(),
+            imp_price.tolist(),
+            exp_price.tolist(),
+            soc0=p["soc_init"],
+            lng0=p["lng_min"],
         )
-
-        if not res.success:
-            # fallback: copy rule-based for this step
-            rows.append(dict(nuclear=p["nuclear"], coal=p["coal"], lng=lng_now,
-                             solar=solar[t], ess_charge=0, ess_discharge=0,
-                             grid_import=0, export_mwh=0, curtailment=0,
-                             soc=soc, cost=0, demand=dm[t]))
-            continue
-
-        chg = max(0.0, min(res.x[rem], (SOC_MAX - soc) * ESS_CAP / ESS_EFF))
-        soc_mid = soc + chg * ESS_EFF / ESS_CAP
-        dis = max(0.0, min(res.x[2 * rem], (soc_mid - SOC_MIN) * ESS_CAP * ESS_EFF))
-        soc = float(np.clip(soc_mid - dis / (ESS_EFF * ESS_CAP), SOC_MIN, SOC_MAX))
-
-        lng_cmd = float(res.x[0])
-        lng_now = float(np.clip(lng_cmd,
-                                max(p["lng_min"], lng_now - 500),
-                                min(p["lng_max"], lng_now + 500)))
-
-        ess_net = chg - dis * ESS_EFF
-        fixed   = p["nuclear"] + p["coal"] + solar[t]
-        total   = fixed + lng_now - ess_net
-        surplus = max(0.0, total - dm[t])
-        export  = min(p["exp_cap"], surplus)
-        deficit = max(0.0, dm[t] - (total - export))
-        imp     = min(deficit, p["imp_cap"])
-        curtail = max(0.0, (total - export) - dm[t] - imp)
-        cost    = lng_now * 120 + imp * 176 - export * 176 * 0.45
-        rows.append(dict(nuclear=p["nuclear"], coal=p["coal"], lng=lng_now,
-                         solar=solar[t], ess_charge=chg, ess_discharge=dis,
-                         grid_import=imp, export_mwh=export,
-                         curtailment=curtail, soc=soc, cost=cost, demand=dm[t]))
-    return pd.DataFrame(rows)
+        return df
+    except RuntimeError:
+        return run_rule_based(dm, solar, p)
+    finally:
+        for k, v in _orig.items():
+            setattr(_mpc, k, v)
 
 
 # ── Chart helpers ───────────────────────────────────────────────────────────
@@ -230,7 +235,7 @@ def summary_metrics(df_rule, df_mpc):
         r = df_rule[key].sum() / div
         m = df_mpc[key].sum() / div
         delta = m - r
-        pct   = delta / (abs(r) + 1e-9) * 100
+        pct   = delta / (abs(r) + 1.0) * 100  # +1 prevents explosion when r≈0
         arrow = "▼" if delta < 0 else "▲"
         good  = (delta < 0) == lower_is_better
         color = "#2ecc71" if good else "#e74c3c"
@@ -306,7 +311,9 @@ if len(day_data) < 24:
     st.stop()
 
 demand_actual = day_data["demand"].values[:24].astype(float)
-solar_actual  = day_data["renewable_total"].values[:24].astype(float) * renew_mult
+# renewable_total: test_raw.csv의 실제 재생에너지 발전량(MWh) — 04_run_mpc.py와 동일 소스
+solar_actual  = np.clip(day_data["renewable_total"].values[:24].astype(float), 0, None) * renew_mult
+selected_month = pd.to_datetime(selected_date).month
 
 if TFT_AVAILABLE:
     fc_row    = forecasts[forecasts["date"] == selected_date]
@@ -314,21 +321,19 @@ if TFT_AVAILABLE:
 else:
     fc_demand = demand_actual  # Perfect forecast fallback
 
-# weather summary
-weather_cols = ["temp_mean", "humidity", "wind_speed", "solar_rad"]
-w = day_data.iloc[0]
+# weather summary (일별 대표값)
 wc1, wc2, wc3, wc4 = st.columns(4)
-wc1.metric("🌡 Avg Temp", f"{w['temp_mean']:.1f} °C")
-wc2.metric("💧 Humidity", f"{w['humidity']:.0f} %")
-wc3.metric("💨 Wind Speed", f"{w['wind_speed']:.1f} m/s")
-wc4.metric("☀️ Solar Rad", f"{w['solar_rad']:.1f} MJ/m²")
+wc1.metric("🌡 Avg Temp",      f"{day_data['temp_mean'].mean():.1f} °C")
+wc2.metric("💧 Humidity",      f"{day_data['humidity'].mean():.0f} %")
+wc3.metric("💨 Wind Speed",    f"{day_data['wind_speed'].mean():.1f} m/s")
+wc4.metric("☀️ Renewable Gen", f"{solar_actual.sum():.0f} MWh (daily)")
 
 st.divider()
 
 # ── Run simulations ───────────────────────────────────────────────────────
 with st.spinner("Simulating..."):
     df_rule = run_rule_based(demand_actual, solar_actual, params)
-    df_mpc  = run_mpc(demand_actual, solar_actual, fc_demand, params)
+    df_mpc  = run_mpc(demand_actual, solar_actual, fc_demand, params, month=selected_month)
 
 # ── Summary metrics ───────────────────────────────────────────────────────
 st.subheader("📊 Daily Summary — MPC-TFT vs Rule-Based")
